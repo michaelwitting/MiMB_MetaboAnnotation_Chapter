@@ -1,0 +1,483 @@
+---
+title: "Metabolomics data annotation using MetaboAnnotation"
+format: html
+author: "Michael Witting, Johannes Rainer"
+---
+
+```{r}
+#| message: false
+#| echo: false
+library(BiocStyle)
+```
+
+# Matching based on exact *m/z* values
+
+The simplest approach to tentatively annotate features from LC-MS experiments,
+albeit with the lowest confidence and highest false positive rates, is to match
+the experimentally measured features' *m/z* values against theoretical *m/z*
+values for expected adducts/ions of chemical compounds. This can be done with
+the `matchValues()` function from the `r Biocpkg("MetaboAnnotation")` package.
+
+We next load all required libraries.
+
+```{r}
+#| message: false
+library(MetaboAnnotation)
+library(MetaboCoreUtils)
+library(tidyverse)
+```
+
+Next we define a `data.frame` with *m/z* values of LC-MS features from an
+untargeted metabolomics experiment. Such features respectively data frame would
+for example be reported from a LC-MS data preprocessing using the 
+`r Biocpkg("xcms")` package. Alternatively, it could be imported from a
+spreadsheet or a tabulator delimited text file.
+
+```{r}
+query_df <- data.frame(
+    id = c("FT001", "FT002", "FT003", "FT004"),
+    mz = c(166.088, 205.0966, 132.1012, 782.5733),
+    chem_formula = c("C9H11NO2" ,"C11H12N2O2", "C6H13NO2", "C44H80NO8P"))
+```
+
+Also, we define next a *reference* `data.frame` with theoretical *m/z* values of
+some selected chemical compounds. Such reference data could be generated from
+various sources including PubChem, MassBank, HMDB etc. The exact (monoisotopic)
+mass of the individual compounds is calculated with the `calculateMass()`
+function from the compounds' chemical formula.
+
+```{r}
+target_df <- data.frame(
+    name = c("Phenylalanine", "Tryptophan", "Leucine", "Isoleucine",
+             "Creatine", "PC 34:1", "PC 36:4"),
+    chem_formula = c("C9H11NO2", "C11H12N2O2", "C6H13NO2", "C6H13NO2",
+                     "C4H9N3O2", "C42H82NO8P", "C44H80NO8P"),
+    chebi = c("CHEBI:28044", "CHEBI:27897", "CHEBI:25017", "CHEBI:24898",
+              "CHEBI:16919", "CHEBI:64517", "CHEBI:64520"),
+    kegg = c("C02057", "C00806", NA, NA,
+             "C00300", NA, NA),
+    hmdb = c(NA, NA, NA, NA,
+             "HMDB0000064", NA, NA),
+    lipidmaps = c(NA, NA, NA, NA,
+                  NA, NA, NA))
+#' calculate neutral exact masses
+target_df$exactmass <- calculateMass(target_df$chem_formula)
+```
+
+The experimental query *m/z* values can be matched against the theoretical ones
+using the `matchValues()` function from the `r Biocpkg("MetaboAnnotation")`
+package. Since the reference `data.frame` contains only the theoretical mass of
+the compounds, we need to use the `Mass2MzParam()` approach for the matching,
+that allows to specify the expected ions of compounds and will calculate the
+respective *m/z* values from the compounds' masses. We below thus configure the
+matching defining to calculate *m/z* values for *[M+H]+* and *[M+Na]+* ions of
+the compounds and report matches with the absolute difference between the query
+and target *m/z* being lower than an constant tolerance of 0.05 Da (`tolerance =
+0.05`). By setting `ppm = 0` no *m/z*-dependent tolerance expressed in ppm
+(parts-per-million) is used.
+
+```{r}
+param <- Mass2MzParam(adducts = c("[M+H]+", "[M+Na]+"),
+                      tolerance = 0.05,
+                      ppm = 0.0)
+match_results <- matchValues(query_df,
+                             target_df,
+                             param)
+```
+
+The resulting `match_results` object contains now the matching results. This
+result object is able to manage the possible m:n matching between query and
+target elements (i.e., that a single query element can match none, one or many
+target elements and each target element can be assigned to none, one or many
+query elements).
+
+The full, expanded, result table can be extracted with `matchedData()`.
+
+```{r}
+matchedData(match_results)
+```
+
+The matching results for a single query feature can be extracted with a subset
+to the respective index. Below we extract the result for the 3rd query
+feature. Note that, for better readability, we use the R *pipe operator* `|>` to
+concatenate consecutive function.
+
+```{r}
+match_results[3L] |>
+    matchedData()
+```
+
+If the reference data frame would already contain *m/z* values for ions of
+target compounds, the `MzParam` could be used instead of the `Mass2MzParam`. We
+below first calculate *m/z* values for *[M+H]+* and *[M+Na]+* ions of all
+reference compounds and add these to the target `data.frame`. 
+
+```{r}
+target_df <- bind_cols(
+    target_df,
+    formula2mz(target_df$chem_formula, adduct = c("[M+H]+", "[M+Na]+"))) |> 
+    pivot_longer(cols = c("[M+H]+", "[M+Na]+"),
+                 names_to = "adduct",
+                 values_to = "mz") |> 
+    as.data.frame()
+```
+
+With *m/z* values
+available, we can perform the matching with `matchValues()` configured using the
+`MzParam` parameter.
+
+```{r}
+param <- MzParam(tolerance = 0.05,
+                 ppm = 0.0)
+match_results <- matchValues(query_df,
+                             target_df,
+                             param)
+matchedData(match_results)
+```
+
+# Matching using chemical formulae
+
+```{r}
+library(MetaboAnnotation)
+```
+
+The query `data.frame` contains identifiers, *m/z* values as well as chemical
+formulae for features.
+
+```{r}
+# query formulas
+query_df <- data.frame(
+    id = c("FT001", "FT002", "FT003", "FT004"),
+    mz = c(166.088, 205.0966, 132.1012, 782.5733),
+    chem_formula = c("C9H11NO2" ,"C11H12N2O2", "C6H13NO2", "C44H80NO8P"))
+```
+
+Next we create a `data.frame` with the *reference* data, i.e., names, chemical
+formulas and various identifiers for metabolites. This reference *database*
+could also be imported or loaded from e.g. HMDB or PubChem.
+
+```{r}
+# database of formulae
+target_df <- data.frame(
+    name = c("Phenylalanine", "Tryptophan", "Leucine", "Isoleucine",
+             "Creatine", "PC 34:1", "PC 36:4"),
+    chem_formula = c("C9H11NO2", "C11H12N2O2", "C6H13NO2", "C6H13NO2",
+                     "C4H9N3O2", "C42H82NO8P", "C44H80NO8P"),
+    chebi = c("CHEBI:28044", "CHEBI:27897", "CHEBI:25017", "CHEBI:24898",
+              "CHEBI:16919", "CHEBI:64517", "CHEBI:64520"),
+    kegg = c("C02057", "C00806", NA, NA,
+             "C00300", NA, NA),
+    hmdb = c(NA, NA, NA, NA,
+             "HMDB0000064", NA, NA),
+    lipidmaps = c(NA, NA, NA, NA,
+                  NA, NA, NA))
+```
+
+The `matchFormula()` function can be used to match data based on their chemical
+formula. Parameter `formulaColname` allows to specify the column name in the
+query respectively target `data.frame` containing the chemical formulas.
+
+```{r}
+# performing matching of formula
+match_results <- matchFormula(query_df,
+                              target_df,
+                              formulaColname = c("chem_formula",
+                                                 "chem_formula"))
+matchedData(match_results)
+```
+
+# Search for fragmentation pattern
+
+Annotation confidence increases with the use of MS2 (fragment) spectra. Besides
+spectral matching which will be discussed later, fragment spectra can also be
+searched for presence of specific fragmentation patterns that can be indicative
+of functional groups or metabolite classes. Such searches can for example be
+performed using the Mass Spectrometry Query Language
+[MassQL](https://mwang87.github.io/MassQueryLanguage_Documentation/). 
+The `r Biocpkg("SpectraQL")` package adds support for this query language to the
+*Spectra* package and hence allows to filter and analyze a `Spectra` object with
+MassQL. In the example below we use MassQL to look for MS2 spectra containing
+fragments with an *m/z* of 184.0733. Phosphocholine containing lipids such as
+phosphatidylcholine (PC) and sphingomyelins (SM) produce a headgroup fragment
+at *m/z* 1840733, while phosphoethanolamine containing lipids, such as
+phosphatidylethanolamines (PE) show a neutral loss of the head group of
+141.0191. 
+
+We first load the required packages, `r Biocpkg("Spectra")` to handle and
+represent MS data in R, `r Biocpkg("MsBackendMgf")` to import/export MS data
+from files in MGF file format and `r Biocpkg("SpectraQL")` to support querying
+MS data in `Spectra` objects with the MassQL query language.
+
+```{r}
+library(Spectra)
+library(MsBackendMgf)
+library(SpectraQL)
+```
+
+We next import the example MS data from the MGF file by specifying the MS
+ *backend* class that supports this type of MS data files with `source =
+ MsBackendMgf()`.
+
+```{r}
+query_specs <- Spectra("exampleData/fecal_ms2data.mgf",
+                       source = MsBackendMgf())
+```
+
+We next use the `scalePeaks()` function to scale the intensities of fragment
+peaks within each spectrum to the base peak signal: all peak intensities are
+divided by the maximum peak intensity per spectrum, resulting in the peak with
+the highest intensity having a value of 1 and all other peaks a value relative
+to this.
+
+```{r}
+query_specs <- scalePeaks(query_specs, by = max)
+```
+
+We next search among the measured fragment spectra those for a specific LPC
+species using the MassQL query language. MassQL allows to express specific
+lookup queries in a more natural language. The MassQL query can be applied to MS
+data of a `Spectra` object using the `query()` function. Below we define a
+MassQL query to search for MS2 spectra with a precursor *m/z* equal to 184.07,
+accepting an absolute difference of 0.005. With `"QUERY *"`, the matching result
+is returned as a `Spectra` object.
+
+```{r}
+query_results_spec <- query(
+    query_specs, "QUERY * WHERE MS2PROD=184.07:TOLERANCEMZ=0.005")
+query_results_spec
+```
+
+We next plot the fragment spectra matching our query.
+
+```{r}
+plotSpectra(query_results_spec)
+```
+
+We repeat the query, but returning the results as a `data.frame` with the
+spectra's metadata instead of the actual fragment spectra.
+
+```{r}
+query_results_df <- query(
+    query_specs, "QUERY scaninfo(MS2DATA) WHERE MS2PROD=184.07:TOLERANCEMZ=0.005")
+```
+
+We next plot the result spectra's retention time against their precursor *m/z*.
+
+```{r}
+plot(query_results_df$rtime,
+     query_results_df$precursorMz,
+     xlab = "rtime",
+     ylab = "precursor m/z")
+grid()
+```
+
+
+# Matching fragment spectra against an external reference database
+
+Higher confidence annotations are obtained if measured MS2 data from biological
+samples is matched against measured fragment spectra of reference
+substances. Multiple public spectral libraries containing such reference spectra
+are available (see chapter 10). These can be easily included in annotation
+workflows employing the `r Biocpkg("MetaboAnnotation")` package. While public
+reference libraries can also be directly integrated and queried, we below read
+reference spectra from a file in MGF format. Subsequently we use the
+`matchSpectra()` function from the *MetaboAnnotation* package to perform the
+pairwise spectra similarity calculation and matching of the experimental query
+spectra against the reference target spectra. The results of this matching,
+which can be an m:n association between query and target spectra, are returned
+as a `MatchedSpectra` object.
+
+We first load the required libraries. The *MsBackendMgf* package is used to
+import the MS data provided as MGF files.
+
+```{r}
+library(Spectra)
+library(MsBackendMgf)
+library(MetaboAnnotation)
+```
+
+We next import the experimental query spectra. For the present example, they are
+provided in a file in MGF format, but they could similarly be extracted from an
+`r Biocpkg("xcms")` LC-MS/MS preprocessing result object using the
+`featureSpectra()` function. Subsequently we normalize the fragment intensities
+to the base peak signal of each spectrum using the `scalePeaks()` function.
+
+```{r}
+query_specs <- Spectra("exampleData/fecal_ms2data.mgf",
+                       source = MsBackendMgf())
+query_specs <- scalePeaks(query_specs, by = max)
+```
+
+Next we load the reference spectra, also from a file in MGF format and perform
+the same scaling operation.
+
+```{r}
+target_external <- Spectra("exampleData/BILELIB19.mgf",
+                           source = MsBackendMgf())
+target_external <- scalePeaks(target_external, by = max)
+```
+
+The `matchSpectra()` function is used for matching of query against reference
+spectra. The approach as well as settings and tolerances for the spectra
+similarity calculation can be configured using a specific parameter object. In
+our example we use a `MatchForwardReverseParam()` that performs a *forward*
+matching of all query against all target spectra and in addition calculates the
+*reverse* similarity score between the matched target and the query spectrum. By
+default, with parameter `requirePrecursor = TRUE`, only fragment peak similarity
+calculations are performed if the precursor *m/z* of a query and a target
+spectra matches (given the provided tolerance, which can be defined with
+parameters `tolerance` and `ppm`). Parameters `THRESHFUN` and
+`THRESHFUN_REVERSE` allow to define which pairs of spectra are considered
+*matching*. For the example below, matches between query and target spectra with
+a normalized dot product similarity score larger or equal to 0.7 are
+reported. The actual similarity calculation and matching is performed with `matchSpectra()`.
+
+```{r}
+param <- MatchForwardReverseParam(tolerance = 0.005,
+                                  ppm = 0.0,
+                                  requirePrecursor = TRUE,
+                                  TRESHFUN = function(x) which(x >= 0.7),
+                                  TRESHFUN_REVERSE = function(x) which(x >= 0.7),
+                                  toleranceRt = Inf)
+  
+match_results <- matchSpectra(query_specs,
+                              target_external,
+                              param)
+```
+
+The results from the matching can be extracted using the `matchedData()`
+function that returns a `DataFrame` with the, potentially n:m mapping, between
+query and target spectra. Both query as well as target spectra can occur
+repeatedly in multiple rows.
+
+```{r}
+# retrieve results
+matchedData(match_results)
+```
+
+Note also that query spectra that could not be matched to any reference spectra
+are reported in the result data frame. The result object can also be subset to
+matching query spectra using the `whichQuery()` function.
+
+```{r}
+match_results_filtered <- match_results[whichQuery(match_results)]
+matchedData(match_results_filtered)
+```
+
+In addition, results for individual query spectra can be visualized using the
+`plotSpectraMirror()` function. Below we subset the result to the second query
+spectrum and visualize its results. A mirror plot is created for each target
+spectrum the query spectrum was found to match. The upper panel shows the query
+spectrum and the lower panel the target spectrum. Matching peaks are colored
+blue.
+
+```{r}
+# create mirrorplot
+plotSpectraMirror(match_results_filtered[2])
+```
+
+In addition, an interactive visualization and validation is possible using the
+`validateMatchedSpectra()` function.
+
+```{r}
+validateMatchedSpectra(match_results_filtered)
+```
+
+
+# Matching fragment spectra against an internal database
+
+The highest level of confidence is achieved by matching measured fragment
+spectra against an in-house reference database considering the precursor *m/z*,
+the retention time and the MS2 spectrum similarity. To allow matching based on
+retention times, the reference data must have beeen acquired with the same
+chromatography setup.
+
+Matching of experimental (query) fragment against such an in-house reference
+(target) database can be performed with the `r Biocpkg("MetaboAnnotation")`
+package using the `matchSpectra()` function. If the reference database contains
+retention times, the matching can also be configured to consider similarity
+between the query and target retention times.
+
+In the example we match experimental fragment spectra against an in-house
+reference database using retention time and spectra similarity.
+
+We first load the required R packages. The `r Biocpkg("MsBackendMgf")` and 
+`r Biocpkg("MsBackendMassbank")` packages extend the *Spectra* and allow to 
+import MS data from MGF files and MassBank databases, respectively. For the 
+present example the query spectra are imported from a file in MGF format, 
+while an internal reference library in MassBank format is used for the target
+spectra.
+
+```{r}
+library(Spectra)
+library(MsBackendMgf)
+library(MsBackendMassbank)
+library(MetaboAnnotation)
+```
+
+We next import the example query spectra and normalize the fragment intensities
+to each spectrum's base peak signal.
+
+```{r}
+query_specs <- Spectra("exampleData/fecal_ms2data.mgf",
+                       source = MsBackendMgf())
+query_specs <- scalePeaks(query_specs, by = max)
+```
+
+The target spectra are loaded from a subset of an in-house reference library
+in MassBank file format and perform the same peak intensity scaling operation.
+
+```{r}
+# load internal database and normalize intensities
+target_internal <- Spectra(list.files("exampleData/in-house_MassBank/",
+                                      full.names = TRUE),
+                           source = MsBackendMassbank())
+target_internal <- scalePeaks(target_internal, by = max)
+```
+
+For the matching we use `matchSpectra()` configuring the algorithm with the
+`MatchForwardReverseParam` parameter object. By setting `toleranceRt = 30` only 
+spectra are considered matching if the absolute difference of their retention
+times is below 30 seconds.
+
+```{r}
+param <- MatchForwardReverseParam(tolerance = 0.005,
+                                  ppm = 0.0,
+                                  requirePrecursor = TRUE,
+                                  TRESHFUN = function(x) which(x >= 0.7),
+                                  TRESHFUN_REVERSE = function(x) which(x >= 0.7),
+                                  toleranceRt = 0.5 * 60)
+match_results <- matchSpectra(query_specs,
+                              target_internal,
+                              param)
+```
+
+The full mapping results can be extracted using `matchedData()`.
+
+```{r}
+# retrieve results
+matchedData(match_results)
+```
+
+The result object can be restricted to query spectra which at least one match to
+the reference database using the `whichQuery()` function.
+
+```{r}
+match_results_filtered <- match_results[whichQuery(match_results)]
+matchedData(match_results_filtered)
+```
+
+The resulting matched spectra can be visualized with a mirror plot, with the
+query spectrum shown in the upper panel and the reference (target) spectrum in
+the lower panel. Matching peaks are indicated with a blue color.
+
+```{r}
+plotSpectraMirror(match_results_filtered[1])
+```
+
+
+# Session information
+
+```{r}
+sessionInfo()
+```
